@@ -41,21 +41,45 @@ exports.helloworld_2 = v2.https.onRequest((request, response) => {
     response.send(`<h1>${message}</h1>`);
 });
 
-exports.checkForScheduledExpperiences = onSchedule("* * * * *", async (event) => {
-    // check every minute for scheduled experience
-    // for exp in collections.ExperiencesCalendar:
-    //      if exp.startDateTime == now:
-    //          startExperience(exp)
-    //          
-    // if scheduled experience, kick it off (notify for first event)
-    console.log("checking for experiences every minute ", event)
+exports.scheduleExperience = v2.https.onRequest(async (req, res) => {
+    // Allow only POST requests
+    if (req.method !== "POST") {
+        return res.status(405).send("Method Not Allowed");
+    }
+
+    try {
+        // Parse data from the request body
+        const { collectionName, documentData } = req.body;
+
+        // Check if required fields are provided
+        if (!collectionName || !documentData) {
+            return res.status(400).send("Invalid request: collectionName and documentData are required.");
+        }
+
+        // Add the document to the specified Firestore collection
+        const docRef = await admin.firestore().collection(collectionName).add(documentData);
+
+        // Send success response
+        console.log(docRef.path)
+        res.status(200).send(`Document added with ID: ${docRef.id}`);
+    } catch (error) {
+        console.error("Error adding document:", error);
+        res.status(500).send("Error adding document: " + error.message);
+    }
+});
+
+exports.checkForScheduledExperiences = v2.https.onRequest(async (request, response) => { // onSchedule("* * * * *", async (event) => {
+    console.log("checking for experiences every minute ")
+    console.log('request: ', request)
+    console.log('response: ', response)
     const now = admin.firestore.Timestamp.now();
+    console.log(now)
 
     try {
         // Query experiences that are scheduled to start now or earlier but are not active
-        const snapshot = await db.collection('ExperiencesCalendar')
-            .where('start_time', '<=', now)
-            .where('is_active', '==', false)
+        const snapshot = await db.collection('ExperienceCalendar')
+            .where('startDateTime', '<=', now)
+            .where('isActive', '==', false)
             .get();
 
         if (snapshot.empty) {
@@ -67,13 +91,15 @@ exports.checkForScheduledExpperiences = onSchedule("* * * * *", async (event) =>
 
         // Iterate through the experiences and mark them as active
         snapshot.docs.forEach(doc => {
+            debugger;
             const scheduledExperience = db.collection('ExperiencesCalendar').doc(doc.id);
             // TODO: Either call startExperience directly, or batch-mark experiences as active and call startExperience onUpdate of doc
             batch.update(scheduledExperience, { is_active: true });
+            debugger;
             // startExperience(doc.data().experienceRef)  // this.startExperience()?
 
             // Optional: Trigger additional logic to initialize the experience
-            console.log(`Starting experience: ${doc.data().name}`);
+            // console.log(`Starting experience: ${doc.data().name}`);
         });
 
         // Commit the batch update

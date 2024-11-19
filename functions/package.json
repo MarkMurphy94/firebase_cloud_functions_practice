@@ -5,6 +5,7 @@
     "lint": "eslint",
     "serve": "firebase emulators:start --only functions",
     "dev": "firebase emulators:start --inspect-functions --only functions",
+    "dev-all": "firebase emulators:start --inspect-functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
