@@ -1,26 +1,3 @@
-/**
- * Import function triggers from their respective submodules:
- *
- * const {onCall} = require("firebase-functions/v2/https");
- * const {onDocumentWritten} = require("firebase-functions/v2/firestore");
- *
- * See a full list of supported triggers at https://firebase.google.com/docs/functions
- */
-
-// const { onRequest } = require("firebase-functions/v2/https");
-// const logger = require("firebase-functions/logger");
-
-// Create and deploy your first functions
-// https://firebase.google.com/docs/functions/get-started
-
-// exports.helloWorld = onRequest((request, response) => {
-//   logger.info("Hello logs!", {structuredData: true});
-//   response.send("Hello from Firebase!");
-// });
-
-// import * as v2 from "firebase-functions/v2";
-
-
 const v2 = require("firebase-functions/v2");
 const { onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { logger } = require("firebase-functions");
@@ -57,7 +34,17 @@ exports.scheduleExperience = v2.https.onRequest(async (req, res) => {
         }
 
         // Add the document to the specified Firestore collection
-        const docRef = await admin.firestore().collection(collectionName).add(documentData);
+        const expRef = await db.collection("ImmersiveExperiences").doc("5weqGOnb2Kv3DfGFlnEX")
+        const expData = {
+            "experienceRef": expRef,
+            "eventsQueue": [],
+            "hosts": [],
+            "isActive": false,
+            "startDateTime": new Date('2024-11-18T15:00:00Z'),
+            "players": []
+        }
+
+        const docRef = await db.collection(collectionName).add(expData);
 
         // Send success response
         console.log(docRef.path)
@@ -72,9 +59,8 @@ exports.checkForScheduledExperiences = v2.https.onRequest(async (request, respon
     console.log("checking for experiences every minute ")
     console.log('request: ', request)
     console.log('response: ', response)
-    const now = admin.firestore.Timestamp.now();
+    const now = new Date()
     console.log(now)
-
     try {
         // Query experiences that are scheduled to start now or earlier but are not active
         const snapshot = await db.collection('ExperienceCalendar')
@@ -84,17 +70,16 @@ exports.checkForScheduledExperiences = v2.https.onRequest(async (request, respon
 
         if (snapshot.empty) {
             console.log('No experiences to start at this time.');
-            return null;
+            response.status(200).send('No experiences to start at this time.');
         }
 
         const batch = db.batch();
 
         // Iterate through the experiences and mark them as active
         snapshot.docs.forEach(doc => {
-            debugger;
-            const scheduledExperience = db.collection('ExperiencesCalendar').doc(doc.id);
+            const scheduledExperience = db.collection('ExperienceCalendar').doc(doc.id);
             // TODO: Either call startExperience directly, or batch-mark experiences as active and call startExperience onUpdate of doc
-            batch.update(scheduledExperience, { is_active: true });
+            batch.update(scheduledExperience, { isActive: true });
             debugger;
             // startExperience(doc.data().experienceRef)  // this.startExperience()?
 
@@ -105,15 +90,17 @@ exports.checkForScheduledExperiences = v2.https.onRequest(async (request, respon
         // Commit the batch update
         await batch.commit();
         console.log('Experiences successfully started.');
+        response.status(200).send('Experiences successfully started.');
 
     } catch (error) {
         console.error('Error starting experiences:', error);
+        response.status(500).send(error);
     }
     return null;
 });
 
 // exports.startExperience = functions.firestore
-//     .document('ExperiencesCalendar/{experienceId}')
+//     .document('ExperienceCalendar/{experienceId}')
 //     .onUpdate(async (change, context) => {...})
 exports.startExperience = onCall(async (change, context) => {
     const experience = change.after.data();
@@ -132,7 +119,7 @@ exports.startExperience = onCall(async (change, context) => {
         if (eventsQueue.length > 0) {
             const firstEvent = eventsQueue[0];
             await triggerEvent(firstEvent);
-            await db.collection('ExperiencesCalendar').doc(experienceId).update({
+            await db.collection('ExperienceCalendar').doc(experienceId).update({
                 queue_initialized: true,
                 current_event_id: firstEvent.id
             });
