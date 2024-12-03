@@ -8,16 +8,6 @@ const admin = require('firebase-admin');
 admin.initializeApp();
 const db = admin.firestore();
 
-exports.helloworld_2 = v2.https.onRequest((request, response) => {
-    // will print a link to run the function in the emulator logs
-    debugger;
-    const name = request.params[0].replace("/", "");
-    const items = { lamp: "this is lamp", chair: "good chair" };  // for a valid request, append either lamp or chair
-    const message = items[name];
-    console.log('weeeeeeeeeeeeeeeeeeeeeeeeeeee')
-    response.send(`<h1>${message}</h1>`);
-});
-
 exports.scheduleExperience = v2.https.onRequest(async (req, res) => {
     if (req.method !== "POST") {
         return res.status(405).send("Method Not Allowed");
@@ -148,3 +138,13 @@ exports.triggerEvent = onCall(async (event) => {
 //     // send notification to all hosts
 //     // send any provided message(s) to player
 // })
+
+// exports.helloworld_2 = v2.https.onRequest((request, response) => {
+//     // will print a link to run the function in the emulator logs
+//     debugger;
+//     const name = request.params[0].replace("/", "");
+//     const items = { lamp: "this is lamp", chair: "good chair" };  // for a valid request, append either lamp or chair
+//     const message = items[name];
+//     console.log('weeeeeeeeeeeeeeeeeeeeeeeeeeee')
+//     response.send(`<h1>${message}</h1>`);
+// });
