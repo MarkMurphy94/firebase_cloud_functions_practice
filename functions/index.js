@@ -6,6 +6,7 @@
 /* eslint-disable max-len */
 const v2 = require("firebase-functions/v2");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { logger } = require("firebase-functions");
 const { onCall } = require("firebase-functions/https");
 const admin = require("firebase-admin");
 
@@ -83,7 +84,7 @@ const monitorLocation = async (payload) => {
 
 // Main functions
 exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter) => {
-    console.log("Checking for scheduled experiences every minute.");
+    logger.log("Checking for scheduled experiences every minute.");
     const now = admin.firestore.Timestamp.fromDate(new Date()); // Convert to Firestore Timestamp
 
     try {
@@ -93,7 +94,7 @@ exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter)
             .get();
 
         if (snapshot.empty) {
-            console.log("No experiences to start at this time.");
+            logger.log("No experiences to start at this time.");
             return null; // Exit the function early
         }
 
@@ -102,15 +103,16 @@ exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter)
         snapshot.docs.forEach((doc) => {
             const scheduledExperience = doc.ref; // Use doc.ref directly
             batch.update(scheduledExperience, { isActive: true });
-            console.log(`Marked experience ${doc.id} as active.`);
+            logger.log(`Marked experience ${doc.id} as active.`);
+            this.startExperience(doc.id);
             // TODO - call startExperience(scheduledExperience)
             // form queue of experiences to start?
         });
 
         await batch.commit(); // Commit all updates
-        console.log("Experiences successfully marked as active.");
+        logger.log("Experiences successfully marked as active.");
     } catch (error) {
-        console.error("Error marking experiences active:", error);
+        logger.error("Error marking experiences active:", error);
     }
 
     return null; // Function must return a value
@@ -164,7 +166,7 @@ exports.startExperience = onCall(async (data, context) => {
 
         return { success: true };
     } catch (error) {
-        console.error("Error in startExperience:", error);
+        logger.error("Error in startExperience:", error);
         throw new v2.https.HttpsError(
             "internal",
             "An error occurred while starting the experience.",
@@ -199,7 +201,7 @@ exports.triggerEncounter = onCall(async (data, context) => {
             await sendNotificationToPlayer(encounter.payload);
             break;
         default:
-            console.log("Unknown encounter type");
+            logger.log("Unknown encounter type");
     }
     return { success: true };
 });
@@ -240,7 +242,7 @@ exports.endExperience = onCall(async (data, context) => {
 
         return { message: `Document ${docRefString} updated successfully.` };
     } catch (error) {
-        console.error("Error updating document: ", error);
+        logger.error("Error updating document: ", error);
         throw new v2.https.HttpsError(
             "unknown",
             "An error occurred while updating the document.",
@@ -265,7 +267,7 @@ exports.queryUserLocation = onCall(async (change, context) => {
     // Check if within the arrival radius (e.g., 50 meters)
     const arrivalRadius = 0.05; // in kilometers
     if (distance <= arrivalRadius) {
-        console.log("User has arrived at the destination");
+        logger.log("User has arrived at the destination");
         // Update user status or notify
         await admin.firestore()
             .collection("users")
@@ -303,7 +305,7 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
 //     const name = request.params[0].replace("/", "");
 //     const items = { lamp: "this is lamp", chair: "good chair" };  // for a valid request, append either lamp or chair
 //     const message = items[name];
-//     console.log('weeeeeeeeeeeeeeeeeeeeeeeeeeee')
+//     logger.log('weeeeeeeeeeeeeeeeeeeeeeeeeeee')
 //     response.send(`<h1>${message}</h1>`);
 // });
 
@@ -331,10 +333,10 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
 
 //         const docRef = await db.collection(collectionName).add(expData);
 
-//         console.log(docRef.path);
+//         logger.log(docRef.path);
 //         res.status(200).send(`Document added with ID: ${docRef.id}`);
 //     } catch (error) {
-//         console.error("Error adding document:", error);
+//         logger.error("Error adding document:", error);
 //         res.status(500).send("Error adding document: " + error.message);
 //     }
 // });
