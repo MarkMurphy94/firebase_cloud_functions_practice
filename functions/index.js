@@ -13,13 +13,18 @@ const admin = require("firebase-admin");
 admin.initializeApp();
 const db = admin.firestore();
 
-// Helper functions for Firebase Cloud Messaging and encounter handling
+// encounter handler helper functions
 const sendMessageToPlayer = async (payload) => {
+    logger.log("[sendMessageToPlayer] Starting with payload:", payload);
     const { userId, message } = payload;
+
     const userDoc = await db.collection("users").doc(userId).get();
-    const fcmToken = userDoc.data().fcmToken;
+    logger.log("[sendMessageToPlayer] Found user document:", userDoc.exists);
+    const userData = userDoc.data();
+    const fcmToken = userData && userData.fcmToken;
 
     if (fcmToken) {
+        logger.log("[sendMessageToPlayer] Sending FCM message to token:", fcmToken);
         await admin.messaging().send({
             token: fcmToken,
             notification: {
@@ -27,16 +32,33 @@ const sendMessageToPlayer = async (payload) => {
                 body: message,
             },
         });
+    } else {
+        logger.warn("[sendMessageToPlayer] No FCM token found for user:", userId);
     }
-    return;
+};
+
+const monitorLocation = async (payload) => {
+    logger.log("[monitorLocation] Starting with payload:", payload);
+    const { userId, geofence } = payload;
+    const geofenceDoc = await db.collection("activeGeofences").add({
+        userId,
+        ...geofence,
+        timestamp: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    logger.log("[monitorLocation] Created geofence document:", geofenceDoc.id);
 };
 
 const sendNotificationToPlayer = async (payload) => {
+    logger.log("[sendNotificationToPlayer] Starting with payload:", payload);
     const { userId, notification } = payload;
+
     const userDoc = await db.collection("users").doc(userId).get();
-    const fcmToken = userDoc.data().fcmToken;
+    logger.log("[sendNotificationToPlayer] Found user document:", userDoc.exists);
+    const userData = userDoc.data();
+    const fcmToken = userData && userData.fcmToken;
 
     if (fcmToken) {
+        logger.log("[sendNotificationToPlayer] Sending notification to token:", fcmToken);
         await admin.messaging().send({
             token: fcmToken,
             notification: {
@@ -44,20 +66,32 @@ const sendNotificationToPlayer = async (payload) => {
                 body: notification.body,
             },
         });
+    } else {
+        logger.warn("[sendNotificationToPlayer] No FCM token found for user:", userId);
     }
-    return;
 };
 
 const sendNotificationToHosts = async (payload) => {
+    logger.log("[sendNotificationToHosts] Starting with payload:", payload);
     const { experienceId, notification } = payload;
-    const expDoc = await db.collection("ExperienceCalendar").doc(experienceId).get();
-    const hosts = expDoc.data().hosts || [];
+
+    const expDoc = await db
+        .collection("ExperienceCalendar")
+        .doc(experienceId)
+        .get();
+    logger.log("[sendNotificationToHosts] Found experience document:", expDoc.exists);
+    const expData = expDoc.data();
+    const hosts = expData ? expData.hosts || [] : [];
+    logger.log("[sendNotificationToHosts] Found hosts:", hosts.length);
 
     const notifications = hosts.map(async (hostId) => {
         const hostDoc = await db.collection("users").doc(hostId).get();
-        const fcmToken = hostDoc.data().fcmToken;
+        logger.log("[sendNotificationToHosts] Processing host:", hostId, "exists:", hostDoc.exists);
+        const hostData = hostDoc.data();
+        const fcmToken = hostData && hostData.fcmToken;
 
         if (fcmToken) {
+            logger.log("[sendNotificationToHosts] Sending notification to host:", hostId);
             await admin.messaging().send({
                 token: fcmToken,
                 notification: {
@@ -65,149 +99,122 @@ const sendNotificationToHosts = async (payload) => {
                     body: notification.body,
                 },
             });
+        } else {
+            logger.warn("[sendNotificationToHosts] No FCM token found for host:", hostId);
         }
     });
 
     await Promise.all(notifications);
-    return;
+    logger.log("[sendNotificationToHosts] Completed sending notifications to all hosts");
 };
 
-const monitorLocation = async (payload) => {
-    const { userId, geofence } = payload;
-    await db.collection("activeGeofences").add({
-        userId,
-        ...geofence,
-        timestamp: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    return;
-};
-
-// Main functions
-exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter) => {
-    logger.log("Checking for scheduled experiences every minute.");
-    const now = admin.firestore.Timestamp.fromDate(new Date()); // Convert to Firestore Timestamp
+// Internal functions
+const runExperience = async (scheduledExperienceId, auth) => {
+    logger.log("[runExperience] Starting experience with scheduledExperienceId:", scheduledExperienceId, "auth:", auth);
 
     try {
-        const snapshot = await db.collection("ExperienceCalendar")
-            .where("startDateTime", "<=", now) // TODO: where startDateTime is within the last 1-2 minutes. Don't want to re-activate old experiences...
-            .where("isActive", "==", false)
-            .get();
-
-        if (snapshot.empty) {
-            logger.log("No experiences to start at this time.");
-            return null; // Exit the function early
-        }
-
-        const batch = db.batch();
-
-        snapshot.docs.forEach((doc) => {
-            const scheduledExperience = doc.ref; // Use doc.ref directly
-            batch.update(scheduledExperience, { isActive: true });
-            logger.log(`Marked experience ${doc.id} as active.`);
-            this.startExperience(doc.id);
-            // TODO - call startExperience(scheduledExperience)
-            // form queue of experiences to start?
-        });
-
-        await batch.commit(); // Commit all updates
-        logger.log("Experiences successfully marked as active.");
-    } catch (error) {
-        logger.error("Error marking experiences active:", error);
-    }
-
-    return null; // Function must return a value
-});
-
-exports.startExperience = onCall(async (data, context) => {
-    if (!context.auth) {
-        throw new v2.https.HttpsError(
-            "unauthenticated",
-            "The function must be called while authenticated.",
-        );
-    }
-
-    const { experienceId } = data;
-    if (!experienceId) {
-        throw new v2.https.HttpsError(
-            "invalid-argument",
-            "Experience ID is required.",
-        );
-    }
-
-    try {
-        const expRef = db.collection("ExperienceCalendar").doc(experienceId);
+        const expRef = db.collection("ExperienceCalendar").doc(scheduledExperienceId);
         const expDoc = await expRef.get();
-        const experience = expDoc.data();
+        const scheduledExperience = expDoc.data();
 
-        if (!experience) {
-            throw new v2.https.HttpsError("not-found", "Experience not found.");
+        if (!scheduledExperience) {
+            logger.warn("[runExperience] Experience not found:", scheduledExperienceId);
+            throw new Error("Experience not found");
         }
+        logger.log("[runExperience] scheduled experience data:", scheduledExperience);
+        if (scheduledExperience.isActive) {
+            logger.log("[runExperience] Initializing queue for active experience");
+            const originalExperience = db.collection("ImmersiveExperiences").doc(scheduledExperience.experienceId);
+            const experienceData = await originalExperience.get();
+            const expData = experienceData.data();
+            const encountersQueue = expData ? expData.encounters || [] : [];
+            logger.log("[runExperience] Found encounters:", encountersQueue.length);
 
-        if (experience.isActive && !experience.queue_initialized) {
-            const experienceRef = experience.experienceRef;
-            const experienceData = await experienceRef.get();
-            const encounters = experienceData.data().encounters || [];
+            if (encountersQueue.length > 0) {
+                const firstEncounter = encountersQueue[0];
+                logger.log("[runExperience] Triggering first encounter:", firstEncounter.id);
+                await triggerEncounter(firstEncounter.type, firstEncounter.payload, auth, expData);
 
-            if (encounters.length > 0) {
-                const firstEncounter = encounters[0];
-                await exports.triggerEncounter({
-                    data: {
-                        type: firstEncounter.type,
-                        payload: firstEncounter.payload,
-                    },
-                });
-
+                logger.log("[runExperience] Updating experience status");
                 await expRef.update({
-                    queue_initialized: true,
+                    encountersQueue: encountersQueue,
                     current_encounter_id: firstEncounter.id,
                 });
+                logger.log("[runExperience] Experience status updated successfully");
             }
+        } else {
+            logger.log("[runExperience] Experience not active or queue already initialized");
         }
 
+        logger.log("[runExperience] Successfully completed");
         return { success: true };
     } catch (error) {
-        logger.error("Error in startExperience:", error);
-        throw new v2.https.HttpsError(
-            "internal",
-            "An error occurred while starting the experience.",
-        );
+        logger.error("[runExperience] Error:", error);
+        throw error;
     }
-});
+};
 
-exports.triggerEncounter = onCall(async (data, context) => {
-    if (!context.auth) {
-        throw new v2.https.HttpsError(
-            "unauthenticated",
-            "The function must be called while authenticated.",
-        );
+const triggerEncounter = async (type, payload, auth, expData) => {
+    logger.log("[triggerEncounter] Starting with type:", type, "auth:", auth, "experienceId:", expData.experienceId);
+
+    try {
+        const experience = expData;
+        if (!experience.isActive) {
+            logger.warn("[triggerEncounter] Attempted to trigger encounter for inactive experience:", expData.experienceId);
+            throw new Error("Cannot trigger encounter for inactive experience");
+        }
+
+        logger.log("[triggerEncounter] Experience is active, proceeding with encounter");
+        switch (type) {
+            case "message":
+                await sendMessageToPlayer({ ...payload, experienceId: experience.experienceId });
+                break;
+            case "geofenced_encounter":
+                await monitorLocation({ ...payload, experienceId: experience.experienceId });
+                break;
+            case "planned_encounter":
+                await sendNotificationToPlayer({ ...payload, experienceId: experience.experienceId });
+                await sendNotificationToHosts({ ...payload, experienceId: experience.experienceId });
+                break;
+            case "surprise_encounter":
+                await sendNotificationToHosts({ ...payload, experienceId: experience.experienceId });
+                break;
+            case "item_encounter":
+                await sendNotificationToPlayer({ ...payload, experienceId: experience.experienceId });
+                break;
+            default:
+                logger.warn("[triggerEncounter] Unknown encounter type:", type);
+        }
+        return { success: true };
+    } catch (error) {
+        logger.error("[triggerEncounter] Error:", error);
+        throw error;
     }
+};
 
-    const encounter = data;
-    switch (encounter.type) {
-        case "message":
-            await sendMessageToPlayer(encounter.payload);
-            break;
-        case "geofenced_encounter":
-            await monitorLocation(encounter.payload);
-            break;
-        case "planned_encounter":
-            await sendNotificationToPlayer(encounter.payload);
-            await sendNotificationToHosts(encounter.payload);
-            break;
-        case "surprise_encounter":
-            await sendNotificationToHosts(encounter.payload);
-            break;
-        case "item_encounter":
-            await sendNotificationToPlayer(encounter.payload);
-            break;
-        default:
-            logger.log("Unknown encounter type");
+const endExperience = async (docRefString, auth) => {
+    logger.log("[endExperience] Starting with docRef:", docRefString, "auth:", auth);
+
+    try {
+        const docRef = db.doc(docRefString);
+        const docSnapshot = await docRef.get();
+
+        if (!docSnapshot.exists) {
+            logger.warn("[endExperience] Document not found:", docRefString);
+            throw new Error(`Document at reference ${docRefString} does not exist.`);
+        }
+
+        await docRef.update({ isActive: false });
+        logger.log("[endExperience] Successfully ended experience");
+        return { message: `Document ${docRefString} updated successfully.` };
+    } catch (error) {
+        logger.error("[endExperience] Error:", error);
+        throw error;
     }
-    return { success: true };
-});
+};
 
-exports.endExperience = onCall(async (data, context) => {
-    // Check if the user is authenticated
+// HTTP Callable wrappers
+exports.runExperienceHttp = onCall(async (data, context) => {
     if (!context.auth) {
         throw new v2.https.HttpsError(
             "unauthenticated",
@@ -215,8 +222,68 @@ exports.endExperience = onCall(async (data, context) => {
         );
     }
 
-    // Get the document reference string from the request
-    const docRefString = data.docRefString;
+    const { experienceId } = data;
+    if (!experienceId) {
+        throw new v2.https.HttpsError(
+            "invalid-argument",
+            "Experience ID is required."
+        );
+    }
+
+    try {
+        const result = await runExperience(experienceId, context.auth);
+        return result;
+    } catch (error) {
+        throw new v2.https.HttpsError(
+            "internal",
+            "An error occurred while starting the experience.",
+            error.message
+        );
+    }
+});
+
+exports.triggerEncounterHttp = onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new v2.https.HttpsError(
+            "unauthenticated",
+            "The function must be called while authenticated."
+        );
+    }
+
+    const { type, payload, experienceId } = data;
+    if (!type || !payload || !experienceId) {
+        throw new v2.https.HttpsError(
+            "invalid-argument",
+            "Encounter type, payload, and experienceId are required."
+        );
+    }
+
+    try {
+        const result = await triggerEncounter(type, payload, context.auth, experienceId);
+        return result;
+    } catch (error) {
+        if (error.message === "Experience not found") {
+            throw new v2.https.HttpsError("not-found", "Experience not found");
+        } else if (error.message === "Cannot trigger encounter for inactive experience") {
+            throw new v2.https.HttpsError("failed-precondition", "Cannot trigger encounter for inactive experience");
+        }
+        throw new v2.https.HttpsError(
+            "internal",
+            "Failed to process encounter.",
+            error.message
+        );
+    }
+});
+
+exports.endExperienceHttp = onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new v2.https.HttpsError(
+            "unauthenticated",
+            "The function must be called while authenticated."
+        );
+    }
+
+    const { docRefString } = data;
     if (!docRefString) {
         throw new v2.https.HttpsError(
             "invalid-argument",
@@ -225,30 +292,52 @@ exports.endExperience = onCall(async (data, context) => {
     }
 
     try {
-        // Get the document reference
-        const docRef = db.doc(docRefString);
-
-        // Check if the document exists
-        const docSnapshot = await docRef.get();
-        if (!docSnapshot.exists) {
-            throw new v2.https.HttpsError(
-                "not-found",
-                `Document at reference ${docRefString} does not exist.`
-            );
-        }
-
-        // Update the isActive field to false
-        await docRef.update({ isActive: false });
-
-        return { message: `Document ${docRefString} updated successfully.` };
+        const result = await endExperience(docRefString, context.auth);
+        return result;
     } catch (error) {
-        logger.error("Error updating document: ", error);
         throw new v2.https.HttpsError(
-            "unknown",
-            "An error occurred while updating the document.",
+            "internal",
+            "An error occurred while ending the experience.",
             error.message
         );
     }
+});
+
+// Update checkForScheduledExperiences to use internal function
+exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter) => {
+    logger.log("Checking for scheduled experiences every minute.");
+    const now = admin.firestore.Timestamp.fromDate(new Date());
+
+    try {
+        const snapshot = await db.collection("ExperienceCalendar")
+            .where("startDateTime", "<=", now) // TODO: fix so we don't reactivate old experiences- set to within the last 1-2 minutes
+            .where("isActive", "==", false)
+            .get();
+
+        if (snapshot.empty) {
+            logger.log("No experiences to start at this time.");
+            return null;
+        }
+
+        const batch = db.batch();
+        const systemAuth = { uid: "system" };
+
+        for (const doc of snapshot.docs) {
+            const scheduledExperience = doc.ref;
+            batch.update(scheduledExperience, { isActive: true });
+            logger.log(`Marked experience ${doc.id} as active.`);
+
+            // Use internal runExperience function
+            await runExperience(doc.id, systemAuth); // TODO: fix- isActive still false when called
+        }
+
+        await batch.commit();
+        logger.log("Experiences successfully marked as active.");
+    } catch (error) {
+        logger.error("Error marking experiences active:", error);
+    }
+
+    return null;
 });
 
 exports.queryUserLocation = onCall(async (change, context) => {
@@ -287,56 +376,3 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c; // Distance in km
 }
-
-
-// exports.startExperience = onCall((experience) => {
-//     // for each experience, initialize a queue for encounters/encounters?
-// })
-
-
-// exports.startEncounter = onCall((experience) => {
-//     // send notification to all hosts
-//     // send any provided message(s) to player
-// })
-
-// exports.helloworld_2 = v2.https.onRequest((request, response) => {
-//     // will print a link to run the function in the emulator logs
-//     debugger;
-//     const name = request.params[0].replace("/", "");
-//     const items = { lamp: "this is lamp", chair: "good chair" };  // for a valid request, append either lamp or chair
-//     const message = items[name];
-//     logger.log('weeeeeeeeeeeeeeeeeeeeeeeeeeee')
-//     response.send(`<h1>${message}</h1>`);
-// });
-
-// exports.scheduleExperience = v2.https.onRequest(async (req, res) => {
-//     if (req.method !== "POST") {
-//         return res.status(405).send("Method Not Allowed");
-//     }
-
-//     try {
-//         const { collectionName, documentData } = req.body;
-
-//         if (!collectionName || !documentData) {
-//             return res.status(400).send("Invalid request: collectionName and documentData are required.");
-//         }
-
-//         const expRef = await db.collection("ImmersiveExperiences").doc("5weqGOnb2Kv3DfGFlnEX");
-//         const expData = {
-//             "experienceRef": expRef,
-//             "encountersQueue": [],
-//             "hosts": [],
-//             "isActive": false,
-//             "startDateTime": new Date("2024-11-18T15:00:00Z"),
-//             "players": []
-//         };
-
-//         const docRef = await db.collection(collectionName).add(expData);
-
-//         logger.log(docRef.path);
-//         res.status(200).send(`Document added with ID: ${docRef.id}`);
-//     } catch (error) {
-//         logger.error("Error adding document:", error);
-//         res.status(500).send("Error adding document: " + error.message);
-//     }
-// });
