@@ -1,3 +1,4 @@
+/* eslint-disable linebreak-style */
 /* eslint-disable indent */
 /* eslint-disable require-jsdoc */
 /* eslint-disable no-unused-vars */
@@ -303,9 +304,39 @@ exports.endExperienceHttp = onCall(async (data, context) => {
     }
 });
 
+exports.startActiveExperiences = onSchedule("* * * * *", async () => {
+    logger.log("Checking for scheduled experiences to start.");
+    const now = admin.firestore.Timestamp.fromDate(new Date());
+
+    try {
+        const twoMinutesAgo = admin.firestore.Timestamp.fromDate(new Date(Date.now() - 2 * 60 * 1000));
+        const snapshot = await db.collection("ExperienceCalendar")
+            .where("startDateTime", ">=", twoMinutesAgo)
+            .where("startDateTime", "<=", now)
+            .where("isActive", "==", true)
+            .get();
+
+        if (snapshot.empty) {
+            logger.log("No experiences to start at this time.");
+            return null;
+        }
+        const systemAuth = { uid: "system" };
+
+        for (const doc of snapshot.docs) {
+            // Use internal runExperience function
+            await runExperience(doc.id, systemAuth);
+        }
+        logger.log("Started experiences successfully.");
+    } catch (error) {
+        logger.error("Error starting experiences:", error);
+    }
+
+    return null;
+});
+
 // Update checkForScheduledExperiences to use internal function
-exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter) => {
-    logger.log("Checking for scheduled experiences every minute.");
+exports.checkForScheduledExperiences = onSchedule("* * * * *", async () => {
+    logger.log("Checking for scheduled experiences every minute and marking active.");
     const now = admin.firestore.Timestamp.fromDate(new Date());
 
     try {
@@ -315,20 +346,16 @@ exports.checkForScheduledExperiences = onSchedule("* * * * *", async (encounter)
             .get();
 
         if (snapshot.empty) {
-            logger.log("No experiences to start at this time.");
+            logger.log("No experiences to activate at this time.");
             return null;
         }
 
         const batch = db.batch();
-        const systemAuth = { uid: "system" };
 
         for (const doc of snapshot.docs) {
             const scheduledExperience = doc.ref;
             batch.update(scheduledExperience, { isActive: true });
             logger.log(`Marked experience ${doc.id} as active.`);
-
-            // Use internal runExperience function
-            await runExperience(doc.id, systemAuth); // TODO: fix- isActive still false when called
         }
 
         await batch.commit();
