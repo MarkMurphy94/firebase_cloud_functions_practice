@@ -10,31 +10,38 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { logger } = require("firebase-functions");
 const { onCall } = require("firebase-functions/https");
 const admin = require("firebase-admin");
+const auth = require("firebase-admin/auth");
 
 admin.initializeApp();
 const db = admin.firestore();
 
 // encounter handler helper functions
-const sendMessageToPlayer = async (payload) => {
+const sendMessageToPlayer = async (playerId, payload) => {
     logger.log("[sendMessageToPlayer] Starting with payload:", payload);
-    const { userId, message } = payload;
-
-    const userDoc = await db.collection("users").doc(userId).get();
-    logger.log("[sendMessageToPlayer] Found user document:", userDoc.exists);
+    // const userDoc = await db.collection("Users").doc(userId).get();
+    const userDoc = await auth.getAuth().getUser(playerId)
+        .then((userRecord) => {
+            logger.log("[sendMessageToPlayer] got user:", userRecord);
+        })
+        .catch((error) => {
+            logger.error("[sendMessageToPlayer] Error fetching user document:", error);
+            throw new Error("User not found");
+        });
+    logger.log("[sendMessageToPlayer] Found user document:", userDoc);
     const userData = userDoc.data();
     const fcmToken = userData && userData.fcmToken;
 
     if (fcmToken) {
         logger.log("[sendMessageToPlayer] Sending FCM message to token:", fcmToken);
-        await admin.messaging().send({
-            token: fcmToken,
-            notification: {
-                title: "New Message",
-                body: message,
-            },
-        });
+        // await admin.messaging().send({
+        //     token: fcmToken,
+        //     notification: {
+        //         title: "New Message",
+        //         body: message,
+        //     },
+        // });
     } else {
-        logger.warn("[sendMessageToPlayer] No FCM token found for user:", userId);
+        logger.warn("[sendMessageToPlayer] No FCM token found for user:", playerId);
     }
 };
 
@@ -49,7 +56,7 @@ const monitorLocation = async (payload) => {
     logger.log("[monitorLocation] Created geofence document:", geofenceDoc.id);
 };
 
-const sendNotificationToPlayer = async (payload) => {
+const sendNotificationToPlayer = async (playerId, payload) => {
     logger.log("[sendNotificationToPlayer] Starting with payload:", payload);
     const { userId, notification } = payload;
 
@@ -111,6 +118,10 @@ const sendNotificationToHosts = async (payload) => {
 
 // Internal functions
 const runExperience = async (scheduledExperienceId, auth) => {
+    // runExperience should get the scheduledExperience doc with the PlayerUser ID, isActive bool, and id for the original experience
+    // then get the original experience doc, and initialize the encounters queue
+    // encountersQueue array should maybe be added to the scheduledExperience doc
+    // should then call triggerEncounter on the first encounter in the queue, passing in the encounter data json, and player and host IDs
     logger.log("[runExperience] Starting experience with scheduledExperienceId:", scheduledExperienceId, "auth:", auth);
 
     try {
@@ -126,15 +137,17 @@ const runExperience = async (scheduledExperienceId, auth) => {
         if (scheduledExperience.isActive) {
             logger.log("[runExperience] Initializing queue for active experience");
             const originalExperience = db.collection("ImmersiveExperiences").doc(scheduledExperience.experienceId);
-            const experienceData = await originalExperience.get();
-            const expData = experienceData.data();
+            const originalExperienceData = await originalExperience.get();
+            const expData = originalExperienceData.data();
             const encountersQueue = expData ? expData.encounters || [] : [];
             logger.log("[runExperience] Found encounters:", encountersQueue.length);
 
             if (encountersQueue.length > 0) {
                 const firstEncounter = encountersQueue[0];
                 logger.log("[runExperience] Triggering first encounter:", firstEncounter.id);
-                await triggerEncounter(firstEncounter.type, firstEncounter.payload, auth, expData);
+                const users = scheduledExperience.users || []; // TODO: Implement playerUser(s), and hosts. Hosts should be associated with individual encounters
+                users.push(scheduledExperience.playerUser);
+                await triggerEncounter(firstEncounter, auth, users);
 
                 logger.log("[runExperience] Updating experience status");
                 await expRef.update({
@@ -155,36 +168,42 @@ const runExperience = async (scheduledExperienceId, auth) => {
     }
 };
 
-const triggerEncounter = async (type, payload, auth, expData) => {
-    logger.log("[triggerEncounter] Starting with type:", type, "auth:", auth, "experienceId:", expData.experienceId);
+const triggerEncounter = async (encounter, auth, users, activeExperience = true) => {
+    // trigger needs:
+    // - player + host ids to send messages/notifications to
+    // - encounter data (type, summary, etc.)
+    // - any message/notification payload to send
+    // - active/inactive bool to cancel encounter if experience is inactive. Pass as arg, or check in runExperience?
+    logger.log("[triggerEncounter] Starting with type:", encounter.type, "auth:", auth);
+    logger.log("[triggerEncounter] encounter: ", encounter);
 
     try {
-        const experience = expData;
-        if (!experience.isActive) {
-            logger.warn("[triggerEncounter] Attempted to trigger encounter for inactive experience:", expData.experienceId);
+        if (!activeExperience) {
+            logger.warn("[triggerEncounter] Attempted to trigger encounter for inactive experience:");
             throw new Error("Cannot trigger encounter for inactive experience");
         }
-
+        const playerId = users[0]; // placeholder until hosts + players are implemented
+        const payload = encounter.summary; // TODO: message/text field specific to message encounter types
         logger.log("[triggerEncounter] Experience is active, proceeding with encounter");
-        switch (type) {
+        switch (encounter.type) {
             case "message":
-                await sendMessageToPlayer({ ...payload, experienceId: experience.experienceId });
+                await sendMessageToPlayer(playerId, payload);
                 break;
             case "geofenced_encounter":
-                await monitorLocation({ ...payload, experienceId: experience.experienceId });
+                await monitorLocation();
                 break;
             case "planned_encounter":
-                await sendNotificationToPlayer({ ...payload, experienceId: experience.experienceId });
-                await sendNotificationToHosts({ ...payload, experienceId: experience.experienceId });
+                await sendNotificationToPlayer(playerId, payload);
+                await sendNotificationToHosts(payload);
                 break;
             case "surprise_encounter":
-                await sendNotificationToHosts({ ...payload, experienceId: experience.experienceId });
+                await sendNotificationToHosts(payload);
                 break;
             case "item_encounter":
-                await sendNotificationToPlayer({ ...payload, experienceId: experience.experienceId });
+                await sendNotificationToPlayer(playerId, payload);
                 break;
             default:
-                logger.warn("[triggerEncounter] Unknown encounter type:", type);
+                logger.warn("[triggerEncounter] Unknown encounter type:", payload.type);
         }
         return { success: true };
     } catch (error) {
