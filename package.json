@@ -11,5 +11,9 @@
   "description": "",
   "devDependencies": {
     "firebase-tools": "^13.25.0"
+  },
+  "dependencies": {
+    "form-data": "^4.0.3",
+    "mailgun.js": "^12.0.3"
   }
 }

@@ -11,6 +11,8 @@ const { logger } = require("firebase-functions");
 const { onCall } = require("firebase-functions/https");
 const admin = require("firebase-admin");
 const auth = require("firebase-admin/auth");
+const FormData = require("form-data"); // form-data v4.0.1
+const Mailgun = require("mailgun.js"); // mailgun.js v11.1.0
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -42,6 +44,36 @@ const sendMessageToPlayer = async (playerId, payload) => {
         // });
     } else {
         logger.warn("[sendMessageToPlayer] No FCM token found for user:", playerId);
+    }
+};
+
+const sendEmailToPlayer = async (playerId, payload) => {
+    logger.log("[sendEmailToPlayer] Starting with payload:", payload);
+
+    try {
+        const userRecord = await auth.getAuth().getUser(playerId);
+        logger.log("[sendEmailToPlayer] Got user:", userRecord.email);
+
+        if (!userRecord.email) {
+            logger.warn("[sendEmailToPlayer] No email found for user:", playerId);
+            throw new Error("User has no email address");
+        }
+
+        const mailgun = new Mailgun(FormData);
+        const mg = mailgun.client({
+            username: "orchestrator@sandboxd1328700d06f4d8aa3379a8ba9ae092e.mailgun.org",
+            key: process.env.API_KEY || "API_KEY",
+        });
+        const data = await mg.messages.create("sandboxd1328700d06f4d8aa3379a8ba9ae092e.mailgun.org", {
+            from: "Mailgun Sandbox <orchestrator@sandboxd1328700d06f4d8aa3379a8ba9ae092e.mailgun.org>",
+            to: [userRecord.email],
+            subject: `Hello ${userRecord.displayName || "User"}`,
+            text: `Congratulations ${userRecord.displayName || "User"}, your experience has begun! Get to your first encounter!`,
+        });
+
+        logger.log("[sendEmailToPlayer] Response: ", data); // logs response data
+    } catch (error) {
+        logger.error("[sendEmailToPlayer] Error: ", error); // logs any error
     }
 };
 
@@ -187,7 +219,8 @@ const triggerEncounter = async (encounter, auth, users, activeExperience = true)
         logger.log("[triggerEncounter] Experience is active, proceeding with encounter");
         switch (encounter.type) {
             case "message":
-                await sendMessageToPlayer(playerId, payload);
+                // await sendMessageToPlayer(playerId, payload);
+                await sendEmailToPlayer(playerId, payload);
                 break;
             case "geofenced_encounter":
                 await monitorLocation();
