@@ -68,7 +68,7 @@ const sendEmailToPlayer = async (playerId, payload) => {
             from: "Mailgun Sandbox <orchestrator@sandboxd1328700d06f4d8aa3379a8ba9ae092e.mailgun.org>",
             to: [userRecord.email],
             subject: `Hello ${userRecord.displayName || "User"}`,
-            text: `Congratulations ${userRecord.displayName || "User"}, your experience has begun! Get to your first encounter!`,
+            text: `Congratulations ${userRecord.displayName || "User"}, your message is ${payload || "here!"}`,
         });
 
         logger.log("[sendEmailToPlayer] Response: ", data); // logs response data
@@ -149,12 +149,12 @@ const sendNotificationToHosts = async (payload) => {
 };
 
 // Internal functions
-const runExperience = async (scheduledExperienceId, auth) => {
-    // runExperience should get the scheduledExperience doc with the PlayerUser ID, isActive bool, and id for the original experience
+const startExperience = async (scheduledExperienceId, auth) => {
+    // startExperience should get the scheduledExperience doc with the PlayerUser ID, isActive bool, and id for the original experience
     // then get the original experience doc, and initialize the encounters queue
     // encountersQueue array should maybe be added to the scheduledExperience doc
     // should then call triggerEncounter on the first encounter in the queue, passing in the encounter data json, and player and host IDs
-    logger.log("[runExperience] Starting experience with scheduledExperienceId:", scheduledExperienceId, "auth:", auth);
+    logger.log("[startExperience] Starting experience with scheduledExperienceId:", scheduledExperienceId, "auth:", auth);
 
     try {
         const expRef = db.collection("ExperienceCalendar").doc(scheduledExperienceId);
@@ -162,50 +162,51 @@ const runExperience = async (scheduledExperienceId, auth) => {
         const scheduledExperience = expDoc.data();
 
         if (!scheduledExperience) {
-            logger.warn("[runExperience] Experience not found:", scheduledExperienceId);
+            logger.warn("[startExperience] Experience not found:", scheduledExperienceId);
             throw new Error("Experience not found");
         }
-        logger.log("[runExperience] scheduled experience data:", scheduledExperience);
+        logger.log("[startExperience] scheduled experience data:", scheduledExperience);
         if (scheduledExperience.isActive) {
-            logger.log("[runExperience] Initializing queue for active experience");
+            logger.log("[startExperience] Initializing queue for active experience");
             const originalExperience = db.collection("ImmersiveExperiences").doc(scheduledExperience.experienceId);
             const originalExperienceData = await originalExperience.get();
             const expData = originalExperienceData.data();
             const encountersQueue = expData ? expData.encounters || [] : [];
-            logger.log("[runExperience] Found encounters:", encountersQueue.length);
+            logger.log("[startExperience] Found encounters:", encountersQueue.length);
 
             if (encountersQueue.length > 0) {
                 const firstEncounter = encountersQueue[0];
-                logger.log("[runExperience] Triggering first encounter:", firstEncounter.id);
+                logger.log("[startExperience] Triggering first encounter:", firstEncounter.id);
                 const users = scheduledExperience.users || []; // TODO: Implement playerUser(s), and hosts. Hosts should be associated with individual encounters
                 users.push(scheduledExperience.playerUser);
                 await triggerEncounter(firstEncounter, auth, users);
 
-                logger.log("[runExperience] Updating experience status");
+                logger.log("[startExperience] Updating experience status");
                 await expRef.update({
                     encountersQueue: encountersQueue,
-                    current_encounter_id: firstEncounter.id,
+                    currentEncounterId: firstEncounter.id,
                 });
-                logger.log("[runExperience] Experience status updated successfully");
+                logger.log("[startExperience] Experience status updated successfully");
             }
         } else {
-            logger.log("[runExperience] Experience not active or queue already initialized");
+            logger.log("[startExperience] Experience not active or queue already initialized");
         }
 
-        logger.log("[runExperience] Successfully completed");
+        logger.log("[startExperience] Successfully completed");
         return { success: true };
     } catch (error) {
-        logger.error("[runExperience] Error:", error);
+        logger.error("[startExperience] Error:", error);
         throw error;
     }
 };
 
 const triggerEncounter = async (encounter, auth, users, activeExperience = true) => {
     // trigger needs:
+    // - to listen for, or trigger on change to currentEncounter in the ExperienceCalendar doc
     // - player + host ids to send messages/notifications to
     // - encounter data (type, summary, etc.)
     // - any message/notification payload to send
-    // - active/inactive bool to cancel encounter if experience is inactive. Pass as arg, or check in runExperience?
+    // - active/inactive bool to cancel encounter if experience is inactive. Pass as arg, or check in startExperience?
     logger.log("[triggerEncounter] Starting with type:", encounter.type, "auth:", auth);
     logger.log("[triggerEncounter] encounter: ", encounter);
 
@@ -226,14 +227,15 @@ const triggerEncounter = async (encounter, auth, users, activeExperience = true)
                 await monitorLocation();
                 break;
             case "planned_encounter":
-                await sendNotificationToPlayer(playerId, payload);
+                // await sendNotificationToPlayer(playerId, payload);
                 await sendNotificationToHosts(payload);
                 break;
             case "surprise_encounter":
                 await sendNotificationToHosts(payload);
+                // TODO: implement real-time location tracking on player
                 break;
             case "item_encounter":
-                await sendNotificationToPlayer(playerId, payload);
+                // await sendNotificationToPlayer(playerId, payload);
                 break;
             default:
                 logger.warn("[triggerEncounter] Unknown encounter type:", payload.type);
@@ -241,6 +243,74 @@ const triggerEncounter = async (encounter, auth, users, activeExperience = true)
         return { success: true };
     } catch (error) {
         logger.error("[triggerEncounter] Error:", error);
+        throw error;
+    }
+};
+
+const completeEncounter = async (scheduledExperienceId, auth) => {
+    logger.log("[completeEncounter] Starting with scheduledExperienceId:", scheduledExperienceId, "auth:", auth);
+
+    try {
+        const expRef = db.collection("ExperienceCalendar").doc(scheduledExperienceId);
+        const expDoc = await expRef.get();
+        const scheduledExperience = expDoc.data();
+
+        if (!scheduledExperience) {
+            logger.warn("[completeEncounter] Experience not found:", scheduledExperienceId);
+            throw new Error("Experience not found");
+        }
+
+        logger.log("[completeEncounter] Found scheduled experience data:", scheduledExperience);
+
+        if (!scheduledExperience.isActive) {
+            logger.warn("[completeEncounter] Cannot complete encounter for inactive experience:", scheduledExperienceId);
+            throw new Error("Cannot complete encounter for inactive experience");
+        }
+
+        const encountersQueue = scheduledExperience.encountersQueue || [];
+        const currentEncounterId = scheduledExperience.currentEncounterId;
+
+        logger.log("[completeEncounter] Current encounter ID:", currentEncounterId);
+        logger.log("[completeEncounter] Encounters queue length:", encountersQueue.length);
+
+        // Find the current encounter index in the queue
+        const currentEncounterIndex = encountersQueue.findIndex((encounter) => encounter.id === currentEncounterId);
+
+        if (currentEncounterIndex === -1) {
+            logger.warn("[completeEncounter] Current encounter not found in queue:", currentEncounterId);
+            throw new Error("Current encounter not found in queue");
+        }
+
+        // Check if there's a next encounter
+        const nextEncounterIndex = currentEncounterIndex + 1;
+        if (nextEncounterIndex >= encountersQueue.length) {
+            logger.log("[completeEncounter] No more encounters in queue. Experience completed.");
+            await expRef.update({
+                isActive: false,
+                currentEncounterId: null
+            });
+            return { success: true, message: "Experience completed - no more encounters" };
+        }
+
+        const nextEncounter = encountersQueue[nextEncounterIndex];
+        logger.log("[completeEncounter] Triggering next encounter:", nextEncounter.id);
+
+        // Get users for the encounter
+        const users = scheduledExperience.users || [];
+        users.push(scheduledExperience.playerUser);
+
+        // Trigger the next encounter
+        await triggerEncounter(nextEncounter, auth, users, scheduledExperience.isActive);
+
+        // Update the current encounter ID
+        await expRef.update({
+            currentEncounterId: nextEncounter.id
+        });
+
+        logger.log("[completeEncounter] Successfully completed encounter and triggered next one");
+        return { success: true, message: "Encounter completed and next encounter triggered" };
+    } catch (error) {
+        logger.error("[completeEncounter] Error:", error);
         throw error;
     }
 };
@@ -284,7 +354,7 @@ exports.runExperienceHttp = onCall(async (data, context) => {
     }
 
     try {
-        const result = await runExperience(experienceId, context.auth);
+        const result = await startExperience(experienceId, context.auth);
         return result;
     } catch (error) {
         throw new v2.https.HttpsError(
@@ -323,6 +393,41 @@ exports.triggerEncounterHttp = onCall(async (data, context) => {
         throw new v2.https.HttpsError(
             "internal",
             "Failed to process encounter.",
+            error.message
+        );
+    }
+});
+
+exports.completeEncounterHttp = onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new v2.https.HttpsError(
+            "unauthenticated",
+            "The function must be called while authenticated."
+        );
+    }
+
+    const { scheduledExperienceId } = data;
+    if (!scheduledExperienceId) {
+        throw new v2.https.HttpsError(
+            "invalid-argument",
+            "Scheduled experience ID is required."
+        );
+    }
+
+    try {
+        const result = await completeEncounter(scheduledExperienceId, context.auth);
+        return result;
+    } catch (error) {
+        if (error.message === "Experience not found") {
+            throw new v2.https.HttpsError("not-found", "Experience not found");
+        } else if (error.message === "Cannot complete encounter for inactive experience") {
+            throw new v2.https.HttpsError("failed-precondition", "Cannot complete encounter for inactive experience");
+        } else if (error.message === "Current encounter not found in queue") {
+            throw new v2.https.HttpsError("failed-precondition", "Current encounter not found in queue");
+        }
+        throw new v2.https.HttpsError(
+            "internal",
+            "An error occurred while completing the encounter.",
             error.message
         );
     }
@@ -375,8 +480,8 @@ exports.startActiveExperiences = onSchedule("* * * * *", async () => {
         const systemAuth = { uid: "system" };
 
         for (const doc of snapshot.docs) {
-            // Use internal runExperience function
-            await runExperience(doc.id, systemAuth);
+            // Use internal startExperience function
+            await startExperience(doc.id, systemAuth);
         }
         logger.log("Started experiences successfully.");
     } catch (error) {
